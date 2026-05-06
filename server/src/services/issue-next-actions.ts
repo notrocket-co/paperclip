@@ -206,3 +206,87 @@ export function logMissingNextActionsAdvisory(input: {
     "issue.next_actions.missing_advisory",
   );
 }
+
+// THEA-2825 — Phase-2 hard-mode (drafted via THEA-2852). When the
+// `NEXT_ACTIONS_HARD_MODE` env var is set to `"true"`, status flips into
+// `done` / `in_review` / `blocked` without an explicit `nextActions` payload
+// are rejected with HTTP 422 instead of falling through to the Phase-1
+// advisory + auto-derivation. Default OFF — env var unset / any other value
+// preserves Phase-1 behavior bit-for-bit.
+
+export const NEXT_ACTIONS_HARD_MODE_ENV_VAR = "NEXT_ACTIONS_HARD_MODE";
+
+/**
+ * Read the hard-mode toggle from the process environment. Pure-ish: reads
+ * `process.env` so tests can flip the flag with `vi.stubEnv` or the standard
+ * `process.env.NEXT_ACTIONS_HARD_MODE = "true"` pattern.
+ */
+export function isNextActionsHardModeEnabled(): boolean {
+  return process.env[NEXT_ACTIONS_HARD_MODE_ENV_VAR] === "true";
+}
+
+/**
+ * Decide whether a PATCH /issues/:id payload should be rejected under
+ * hard-mode. Pure function — given the toggle state and the relevant slice of
+ * the request body / existing issue, returns true when the gate must fire.
+ *
+ * Spec (AGENTS.md §11): hard-mode rejects status flips into the required set
+ * (done / in_review / blocked) when the agent didn't supply an explicit
+ * `nextActions` array. `nextActions: [{ kind: "terminal" }]` is accepted as
+ * the canonical "no follow-up" sentinel; an empty array is also treated as
+ * an explicit emission to mirror Phase-1's `explicitNextActionsProvided`
+ * semantics.
+ */
+export function shouldRejectMissingNextActions(input: {
+  hardModeEnabled: boolean;
+  requestedStatus: unknown;
+  existingStatus: string;
+  nextActionsBody: unknown;
+}): boolean {
+  if (!input.hardModeEnabled) return false;
+  if (typeof input.requestedStatus !== "string") return false;
+  if (!isNextActionsRequiredStatus(input.requestedStatus)) return false;
+  if (input.requestedStatus === input.existingStatus) return false;
+  return input.nextActionsBody === undefined || input.nextActionsBody === null;
+}
+
+export interface NextActionsHardModeRejectionPayload {
+  error: string;
+  message: string;
+  details: {
+    status: string;
+    previousStatus: string;
+    requiredField: "nextActions";
+    docsRef: string;
+    spec: string;
+    rollback: string;
+  };
+}
+
+/**
+ * Build the structured 422 response body for a hard-mode rejection. Kept
+ * separate from the route handler so unit tests can assert on the shape and
+ * future tooling can reuse the copy.
+ */
+export function buildNextActionsHardModeRejectionPayload(input: {
+  requestedStatus: string;
+  existingStatus: string;
+}): NextActionsHardModeRejectionPayload {
+  return {
+    error: "issue.next_actions.required",
+    message:
+      "Status flips to done/in_review/blocked require an explicit nextActions handoff payload. " +
+      "Provide nextActions: [{ kind, targetIssueId?, targetAssigneeAgentId, note? }] or " +
+      'nextActions: [{ kind: "terminal" }] when no follow-up is needed.',
+    details: {
+      status: input.requestedStatus,
+      previousStatus: input.existingStatus,
+      requiredField: "nextActions",
+      docsRef: "AGENTS.md §11 — Pillar 5 close-out protocol",
+      spec:
+        'nextActions: [{ kind: "review"|"build"|"decide"|"close"|"terminal", ' +
+        "targetIssueId?: uuid, targetAssigneeAgentId?: uuid, note?: string }]",
+      rollback: `Set ${NEXT_ACTIONS_HARD_MODE_ENV_VAR}=false (or unset it) and restart the paperclip container to fall back to Phase-1 advisory behavior.`,
+    },
+  };
+}

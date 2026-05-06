@@ -72,10 +72,13 @@ import {
 } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import {
+  buildNextActionsHardModeRejectionPayload,
   computeDefaultNextActions,
+  isNextActionsHardModeEnabled,
   isNextActionsRequiredStatus,
   logMissingNextActionsAdvisory,
   resolveNextActionsContext,
+  shouldRejectMissingNextActions,
 } from "../services/issue-next-actions.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
@@ -1938,6 +1941,58 @@ export function issueRoutes(
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
 
     const actor = getActorInfo(req);
+
+    // THEA-2825 — Phase-2 hard-mode REJECT path (drafted via THEA-2852).
+    // When NEXT_ACTIONS_HARD_MODE=true, status flips into done / in_review /
+    // blocked without an explicit `nextActions` payload are rejected upfront
+    // with HTTP 422 instead of falling through to the Phase-1 advisory +
+    // auto-derivation block further down. Default OFF — env var unset
+    // preserves Phase-1 behavior bit-for-bit.
+    if (
+      shouldRejectMissingNextActions({
+        hardModeEnabled: isNextActionsHardModeEnabled(),
+        requestedStatus: req.body.status,
+        existingStatus: existing.status,
+        nextActionsBody: req.body.nextActions,
+      })
+    ) {
+      const requestedStatus = req.body.status as string;
+      const payload = buildNextActionsHardModeRejectionPayload({
+        requestedStatus,
+        existingStatus: existing.status,
+      });
+      logger.warn(
+        {
+          issueId: existing.id,
+          identifier: existing.identifier,
+          previousStatus: existing.status,
+          newStatus: requestedStatus,
+          actorAgentId: actor.agentId ?? null,
+          actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          thea2825: true,
+        },
+        "issue.next_actions.hard_mode_reject",
+      );
+      await logActivity(db, {
+        companyId: existing.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.next_actions.hard_mode_reject",
+        entityType: "issue",
+        entityId: existing.id,
+        details: {
+          identifier: existing.identifier,
+          previousStatus: existing.status,
+          newStatus: requestedStatus,
+          requiredField: "nextActions",
+        },
+      });
+      res.status(422).json(payload);
+      return;
+    }
+
     const isClosed = isClosedIssueStatus(existing.status);
     const isBlocked = existing.status === "blocked";
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(

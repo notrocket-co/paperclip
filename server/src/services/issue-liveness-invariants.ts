@@ -454,6 +454,9 @@ export async function findStagnantUmbrellas(
   input: { now: Date; limit?: number },
 ): Promise<StagnantUmbrellaRow[]> {
   const limit = input.limit ?? STAGNATION_SCAN_LIMIT;
+  // postgres@3.4.x raw `db.execute(sql\`…\`)` does not coerce timestamptz to
+  // Date — values come back as ISO strings. Type the SQL row accordingly so
+  // the row mapping below knows it has to wrap each timestamp in `new Date()`.
   type StagnantRowSql = {
     id: string;
     identifier: string | null;
@@ -461,9 +464,9 @@ export async function findStagnantUmbrellas(
     company_id: string;
     liveness_invariants: IssueLivenessInvariants | null;
     created_by_agent_id: string | null;
-    last_child_transition_at: Date | null;
-    last_digest_at: Date | null;
-    created_at: Date;
+    last_child_transition_at: string | null;
+    last_digest_at: string | null;
+    created_at: string;
   };
   const rawRows = await db.execute(sql`
     SELECT
@@ -510,9 +513,9 @@ export async function findStagnantUmbrellas(
     companyId: row.company_id,
     livenessInvariants: row.liveness_invariants,
     createdByAgentId: row.created_by_agent_id,
-    lastChildTransitionAt: row.last_child_transition_at,
-    lastDigestAt: row.last_digest_at,
-    createdAt: row.created_at,
+    lastChildTransitionAt: row.last_child_transition_at ? new Date(row.last_child_transition_at) : null,
+    lastDigestAt: row.last_digest_at ? new Date(row.last_digest_at) : null,
+    createdAt: new Date(row.created_at),
   }));
 }
 

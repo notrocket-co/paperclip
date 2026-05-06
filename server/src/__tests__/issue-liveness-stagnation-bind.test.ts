@@ -24,7 +24,10 @@ import {
   createDb,
   issues,
 } from "@paperclipai/db";
-import { findStagnantUmbrellas } from "../services/issue-liveness-invariants.js";
+import {
+  findStagnantUmbrellas,
+  scanStagnation,
+} from "../services/issue-liveness-invariants.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -129,6 +132,92 @@ describeEmbeddedPostgres("regression: findStagnantUmbrellas binds Date params co
       stagnationThresholdHours: 24,
       escalationTarget: "ceo",
     });
+
+    // postgres@3.4.x raw SQL returns timestamptz as ISO strings; the consumer
+    // (`scanStagnation`) calls `.getTime()` on these and crashes if the row
+    // mapping doesn't wrap them in Date. Assert the runtime shape matches
+    // the declared `Date | null` return type.
+    expect(umbrella?.lastChildTransitionAt).toBeInstanceOf(Date);
+    expect(umbrella?.createdAt).toBeInstanceOf(Date);
+  });
+
+  it("scanStagnation runs end-to-end without per-row TypeError on Date math", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const umbrellaId = randomUUID();
+    const childId = randomUUID();
+
+    const now = new Date("2026-05-06T18:00:00.000Z");
+    const stagnationStart = new Date(now.getTime() - 30 * 60 * 60 * 1000);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip stagnation scan e2e",
+      issuePrefix: "SCNE2E",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Scan Owner",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      {
+        id: umbrellaId,
+        companyId,
+        title: "Stagnant umbrella for scan",
+        status: "in_progress",
+        priority: "medium",
+        issueNumber: 1,
+        identifier: "SCNE2E-1",
+        createdByAgentId: ownerAgentId,
+        assigneeAgentId: ownerAgentId,
+        livenessInvariants: {
+          stagnationThresholdHours: 24,
+          escalationTarget: "creator",
+        },
+        createdAt: stagnationStart,
+        updatedAt: stagnationStart,
+        lastChildTransitionAt: stagnationStart,
+      },
+      {
+        id: childId,
+        companyId,
+        title: "Active scan child",
+        status: "in_progress",
+        priority: "medium",
+        parentId: umbrellaId,
+        issueNumber: 2,
+        identifier: "SCNE2E-2",
+        createdAt: stagnationStart,
+        updatedAt: stagnationStart,
+      },
+    ]);
+
+    const addCommentCalls: Array<{ issueId: string; body: string }> = [];
+    const result = await scanStagnation(db, {
+      now,
+      limit: 100,
+      addComment: async (issueId, body) => {
+        addCommentCalls.push({ issueId, body });
+        return { id: randomUUID() };
+      },
+    });
+
+    expect(result.scanned).toBeGreaterThanOrEqual(1);
+    const escalation = result.escalated.find((row) => row.parentId === umbrellaId);
+    expect(escalation).toBeDefined();
+    expect(escalation?.escalationTargetAgentId).toBe(ownerAgentId);
+    // 30 hours stagnant; allow ±1h drift for the math
+    expect(escalation?.hoursSinceLastSignal).toBeGreaterThanOrEqual(29);
+    expect(escalation?.hoursSinceLastSignal).toBeLessThanOrEqual(31);
+    expect(addCommentCalls.find((call) => call.issueId === umbrellaId)).toBeDefined();
   });
 
   it("excludes umbrellas that are within the stagnation threshold window", async () => {

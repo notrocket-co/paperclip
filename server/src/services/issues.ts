@@ -1402,6 +1402,7 @@ const issueListSelect = {
   executionWorkspaceId: issues.executionWorkspaceId,
   executionWorkspacePreference: issues.executionWorkspacePreference,
   executionWorkspaceSettings: sql<null>`null`,
+  nextActions: issues.nextActions,
   startedAt: issues.startedAt,
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,

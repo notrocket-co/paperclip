@@ -130,6 +130,47 @@ const issueRequestDepthInputSchema = z
   .nonnegative()
   .transform((value) => clampIssueRequestDepth(value));
 
+// THEA-2806 — Pillar 5: explicit handoff payload on every status flip.
+export const ISSUE_NEXT_ACTION_KINDS = [
+  "review",
+  "build",
+  "decide",
+  "close",
+  "terminal",
+] as const;
+export type IssueNextActionKind = (typeof ISSUE_NEXT_ACTION_KINDS)[number];
+
+export const issueNextActionSchema = z
+  .object({
+    kind: z.enum(ISSUE_NEXT_ACTION_KINDS),
+    targetIssueId: z.string().uuid().nullable().optional(),
+    targetAssigneeAgentId: z.string().uuid().nullable().optional(),
+    note: z.string().trim().max(2000).nullable().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.kind === "terminal") {
+      if (value.targetIssueId || value.targetAssigneeAgentId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Terminal next-actions cannot target an issue or assignee",
+          path: ["kind"],
+        });
+      }
+      return;
+    }
+    if (!value.targetAssigneeAgentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Non-terminal next-actions require targetAssigneeAgentId",
+        path: ["targetAssigneeAgentId"],
+      });
+    }
+  });
+export type IssueNextAction = z.infer<typeof issueNextActionSchema>;
+
+export const issueNextActionsSchema = z.array(issueNextActionSchema).max(20);
+
 export const createIssueSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
@@ -183,6 +224,10 @@ export const updateIssueSchema = createIssueSchema.partial().extend({
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),
   hiddenAt: z.string().datetime().nullable().optional(),
+  // THEA-2806 — Pillar 5 explicit handoff. Set explicitly to override the
+  // auto-derived default for done/in_review/blocked transitions, or pass
+  // [{ kind: "terminal" }] to assert no follow-up. `null` clears the field.
+  nextActions: issueNextActionsSchema.nullable().optional(),
 });
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;

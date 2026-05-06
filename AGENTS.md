@@ -198,6 +198,32 @@ A change is done when all are true:
    without an explicit emission. See
    `server/src/services/issue-next-actions.ts` for the derivation rules.
 
+7. **Project-level liveness invariants (THEA-2807 / Pillar 4).** Every issue
+   that owns active children (an "umbrella") can declare a liveness
+   invariant via the `livenessInvariants` jsonb field on `PATCH
+   /api/issues/:id`. Defaults applied when the field is `NULL` or `{}`:
+
+   | Field | Default | Effect |
+   | --- | --- | --- |
+   | `digestWithinMin` | 30 | Within X min of any child status transition the parent posts a roll-up digest comment (parent assignee gets a wake). Coalesce — first transition arms; subsequent transitions don't extend. |
+   | `phasePromoteWithinMin` | 30 | When all phase-N children close (`done` OR `cancelled`), promote phase-(N+1) children `backlog → todo` and wake their assignees. Single-hop only — does not recurse. |
+   | `stagnationThresholdHours` | 24 | If no child has transitioned and no digest has fired for X hours, post a stagnation escalation on the umbrella and wake the resolved escalation target. |
+   | `escalationTarget` | `"ceo"` | One of `"ceo"`, `"creator"`, or a literal agent UUID. Never resolves to a userId. |
+
+   Children declare their `phase: int` per child (0 = unphased default).
+   The migration backfills `livenessInvariants = '{}'::jsonb` on every
+   issue with at least one active child so the dashboard tile gets a clean
+   `IS NOT NULL` SELECT — behaviour is identical to `NULL`.
+
+   **Hard rule: liveness comments never contain `@Miller`.** Auto-emitted
+   digest and stagnation comments use the bare `Miller` token (no `@`).
+   Telegram bridge fires on the literal — only the CEO writes `@Miller`,
+   only on THEA-1130. The formatter never inserts the literal AND a
+   `sanitizeMillerToken` pass strips it defensively.
+
+   See `server/src/services/issue-liveness-invariants.ts` for the digest
+   formatter, phase resolver, stagnation predicate, and CAS-arm logic.
+
 ## 11. Fork-Specific: HenkDz/paperclip
 
 This is a fork of `paperclipai/paperclip` with QoL patches and an **external-only** Hermes adapter story on branch `feat/externalize-hermes-adapter` ([tree](https://github.com/HenkDz/paperclip/tree/feat/externalize-hermes-adapter)).

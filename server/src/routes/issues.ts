@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueExecutionDecisions } from "@paperclipai/db";
+import { issueExecutionDecisions, issues } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   acceptIssueThreadInteractionSchema,
@@ -77,6 +78,11 @@ import {
   logMissingNextActionsAdvisory,
   resolveNextActionsContext,
 } from "../services/issue-next-actions.js";
+import {
+  armDigestOnChildTransition,
+  maybePromotePhase,
+  resolveLivenessInvariants,
+} from "../services/issue-liveness-invariants.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -2802,6 +2808,99 @@ export function issueRoutes(
               childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
             },
           });
+        }
+      }
+
+      // THEA-2807 — Pillar 4: liveness invariants on this child's parent.
+      // Fires on EVERY child status transition (not just terminal). Two
+      // effects: (a) atomic-CAS-arm `digest_due_at` so the parent gets a
+      // digest within `digestWithinMin`, (b) on terminal transitions only,
+      // attempt single-hop phase auto-promote of phase-(N+1) backlog
+      // children. Wrapped in try/catch — never fails the request.
+      const childStatusFlipped = issue.status !== existing.status;
+      if (childStatusFlipped && issue.parentId) {
+        try {
+          const parentRow = await db
+            .select({
+              id: issues.id,
+              livenessInvariants: issues.livenessInvariants,
+            })
+            .from(issues)
+            .where(eq(issues.id, issue.parentId))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+
+          if (parentRow && parentRow.livenessInvariants !== null) {
+            const invariants = resolveLivenessInvariants(parentRow.livenessInvariants);
+            const now = new Date();
+
+            // (a) Arm digest debounce timer (atomic CAS).
+            await armDigestOnChildTransition(db, {
+              parentId: parentRow.id,
+              now,
+              withinMin: invariants.digestWithinMin,
+            });
+
+            // (b) Phase auto-promote on terminal transitions only.
+            if (becameTerminal) {
+              const promotion = await maybePromotePhase(db, {
+                parentId: parentRow.id,
+                closedChildId: issue.id,
+                closedChildPhase: issue.phase ?? null,
+              });
+              if (promotion && promotion.promotedChildren.length > 0) {
+                await logActivity(db, {
+                  companyId: issue.companyId,
+                  actorType: actor.actorType,
+                  actorId: actor.actorId,
+                  agentId: actor.agentId,
+                  runId: actor.runId,
+                  action: "issue.liveness_phase_promoted",
+                  entityType: "issue",
+                  entityId: parentRow.id,
+                  details: {
+                    parentIdentifier: existing.identifier ?? null,
+                    closedChildId: issue.id,
+                    closedChildPhase: issue.phase ?? null,
+                    nextPhase: promotion.nextPhase,
+                    promotedChildIds: promotion.promotedChildren.map((c) => c.id),
+                    thea2807: true,
+                  },
+                });
+                for (const promoted of promotion.promotedChildren) {
+                  if (!promoted.assigneeAgentId) continue;
+                  addWakeup(promoted.assigneeAgentId, {
+                    source: "automation",
+                    triggerDetail: "system",
+                    reason: "issue_phase_promoted",
+                    payload: {
+                      issueId: promoted.id,
+                      parentIssueId: parentRow.id,
+                      promotedToStatus: "todo",
+                      promotedFromPhase: issue.phase ?? null,
+                      promotedToPhase: promotion.nextPhase,
+                    },
+                    requestedByActorType: actor.actorType,
+                    requestedByActorId: actor.actorId,
+                    contextSnapshot: {
+                      issueId: promoted.id,
+                      taskId: promoted.id,
+                      parentIssueId: parentRow.id,
+                      wakeReason: "issue_phase_promoted",
+                      source: "issue.liveness_phase_promote",
+                      promotedFromPhase: issue.phase ?? null,
+                      promotedToPhase: promotion.nextPhase,
+                    },
+                  });
+                }
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn(
+            { err, issueId: issue.id, parentId: issue.parentId, thea2807: true },
+            "issue_liveness_invariants.transition_hook_failed",
+          );
         }
       }
 

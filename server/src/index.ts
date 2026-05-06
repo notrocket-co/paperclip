@@ -32,9 +32,16 @@ import {
   feedbackService,
   heartbeatService,
   instanceSettingsService,
+  issueService,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
 } from "./services/index.js";
+import {
+  fireDueDigests as fireDueLivenessDigests,
+  scanStagnation as scanLivenessStagnation,
+  resolveLivenessInvariants,
+  resolveEscalationTarget,
+} from "./services/issue-liveness-invariants.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
@@ -671,6 +678,94 @@ export async function startServer(): Promise<StartedServer> {
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
+    const issues = issueService(db as any);
+
+    // THEA-2807 — Pillar 4: per-tick liveness sweep. Reads umbrellas with
+    // `digest_due_at <= now()` and fires the digest comment + wake; then
+    // scans for stagnant umbrellas and emits an escalation comment + wake
+    // on the resolved target. Wrapped in try/catch — never blocks the rest
+    // of the tick chain.
+    const tickLivenessInvariants = async () => {
+      const now = new Date();
+      try {
+        const result = await fireDueLivenessDigests(db as any, {
+          now,
+          addComment: (issueId, body, actor) => issues.addComment(issueId, body, actor),
+        });
+        for (const wake of result.wakeups) {
+          if (!wake.parentAssigneeAgentId) continue;
+          await heartbeat
+            .wakeup(wake.parentAssigneeAgentId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "issue_liveness_digest",
+              payload: {
+                issueId: wake.parentId,
+                commentId: wake.commentId,
+              },
+              contextSnapshot: {
+                issueId: wake.parentId,
+                taskId: wake.parentId,
+                wakeReason: "issue_liveness_digest",
+                source: "issue.liveness_digest",
+                commentId: wake.commentId,
+              },
+            })
+            .catch((err) =>
+              logger.warn({ err, parentId: wake.parentId, thea2807: true }, "issue_liveness_digest wake failed"),
+            );
+        }
+        if (result.fired > 0) {
+          logger.info({ fired: result.fired, thea2807: true }, "liveness digest sweep fired");
+        }
+      } catch (err) {
+        logger.warn({ err, thea2807: true }, "liveness digest sweep crashed");
+      }
+
+      try {
+        const result = await scanLivenessStagnation(db as any, {
+          now,
+          addComment: (issueId, body, actor) => issues.addComment(issueId, body, actor),
+        });
+        for (const escalation of result.escalated) {
+          await heartbeat
+            .wakeup(escalation.escalationTargetAgentId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "issue_liveness_stagnation",
+              payload: {
+                issueId: escalation.parentId,
+                commentId: escalation.commentId,
+                hoursSinceLastSignal: escalation.hoursSinceLastSignal,
+              },
+              contextSnapshot: {
+                issueId: escalation.parentId,
+                taskId: escalation.parentId,
+                wakeReason: "issue_liveness_stagnation",
+                source: "issue.liveness_stagnation",
+                commentId: escalation.commentId,
+              },
+            })
+            .catch((err) =>
+              logger.warn(
+                { err, parentId: escalation.parentId, thea2807: true },
+                "issue_liveness_stagnation wake failed",
+              ),
+            );
+        }
+        if (result.escalated.length > 0) {
+          logger.warn(
+            { escalated: result.escalated.length, thea2807: true },
+            "liveness stagnation sweep escalated",
+          );
+        }
+      } catch (err) {
+        logger.warn({ err, thea2807: true }, "liveness stagnation sweep crashed");
+      }
+      // Squelch unused-symbol lint for utility helpers re-exported for tests.
+      void resolveLivenessInvariants;
+      void resolveEscalationTarget;
+    };
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
@@ -775,6 +870,10 @@ export async function startServer(): Promise<StartedServer> {
           if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
             logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
           }
+        })
+        .then(async () => {
+          // THEA-2807 — Pillar 4: liveness invariants sweep.
+          await tickLivenessInvariants();
         })
         .catch((err) => {
           logger.error({ err }, "periodic heartbeat recovery failed");

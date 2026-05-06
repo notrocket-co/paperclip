@@ -71,6 +71,12 @@ import {
   SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import {
+  computeDefaultNextActions,
+  isNextActionsRequiredStatus,
+  logMissingNextActionsAdvisory,
+  resolveNextActionsContext,
+} from "../services/issue-next-actions.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -2486,6 +2492,88 @@ export function issueRoutes(
       requestedByActorId: actor.actorId,
     });
 
+    // THEA-2806 — Pillar 5: auto-derive nextActions on flips to done /
+    // in_review / blocked when the agent didn't pass an explicit payload, log
+    // the Phase-1 advisory, and persist whatever shape we ended up with so the
+    // wakeups loop below can fan out wakes to every target.
+    const explicitNextActionsProvided =
+      req.body.nextActions !== undefined && req.body.nextActions !== null;
+    const statusFlippedToRequiredStatus =
+      issue.status !== existing.status && isNextActionsRequiredStatus(issue.status);
+    if (statusFlippedToRequiredStatus && !explicitNextActionsProvided) {
+      try {
+        const unblockedDependents =
+          issue.status === "done"
+            ? (await svc.listWakeableBlockedDependents(issue.id)).map((dep) => ({
+                id: dep.id,
+                assigneeAgentId: dep.assigneeAgentId,
+              }))
+            : [];
+        const nextActionsContext = await resolveNextActionsContext(db, {
+          companyId: issue.companyId,
+          parentId: issue.parentId,
+          unblockedDependents,
+        });
+        const derivedNextActions = computeDefaultNextActions({
+          newStatus: issue.status,
+          previousStatus: existing.status,
+          issue: {
+            id: issue.id,
+            identifier: issue.identifier,
+            createdByAgentId: issue.createdByAgentId,
+          },
+          context: nextActionsContext,
+        });
+        if (derivedNextActions !== null) {
+          const persisted = await svc.update(issue.id, {
+            nextActions: derivedNextActions,
+            actorAgentId: actor.agentId ?? null,
+            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          });
+          if (persisted) {
+            issue = persisted;
+            issueResponse = { ...issueResponse, ...persisted };
+          }
+          logMissingNextActionsAdvisory({
+            issueId: issue.id,
+            identifier: issue.identifier,
+            previousStatus: existing.status,
+            newStatus: issue.status,
+            actorAgentId: actor.agentId ?? null,
+            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+            derivedKinds: derivedNextActions.map((entry) => entry.kind),
+          });
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.next_actions_advisory",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              identifier: issue.identifier,
+              previousStatus: existing.status,
+              newStatus: issue.status,
+              nextActionsAdvisoryMissing: true,
+              derivedKinds: derivedNextActions.map((entry) => entry.kind),
+              derivedTargets: derivedNextActions
+                .map((entry) => entry.targetAssigneeAgentId)
+                .filter((value): value is string => typeof value === "string"),
+            },
+          });
+        }
+      } catch (err) {
+        // Phase-1 advisory must never fail the request. Log and continue;
+        // the explicit nextActions path is unaffected.
+        logger.warn(
+          { err, issueId: issue.id, newStatus: issue.status, thea2806: true },
+          "issue.next_actions.advisory_derivation_failed",
+        );
+      }
+    }
+
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
       type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
@@ -2641,6 +2729,45 @@ export function issueRoutes(
               source: "issue.blockers_resolved",
               resolvedBlockerIssueId: issue.id,
               blockerIssueIds: dependent.blockerIssueIds,
+            },
+          });
+        }
+      }
+
+      // THEA-2806 — Pillar 5: fan out wakes for every nextActions entry on
+      // the (possibly auto-derived) payload. Terminal entries are intentional
+      // no-ops — they declare "the parent already has whatever it needs."
+      const persistedNextActions = Array.isArray(issue.nextActions) ? issue.nextActions : null;
+      const nextActionsSourceWasExplicit = explicitNextActionsProvided;
+      if (persistedNextActions && statusFlippedToRequiredStatus) {
+        for (const entry of persistedNextActions) {
+          if (entry.kind === "terminal") continue;
+          const targetAgentId = entry.targetAssigneeAgentId;
+          if (!targetAgentId) continue;
+          if (actor.actorType === "agent" && actor.actorId === targetAgentId) continue;
+          const targetIssueId = entry.targetIssueId ?? issue.id;
+          addWakeup(targetAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: `issue_next_action_${entry.kind}`,
+            payload: {
+              issueId: targetIssueId,
+              originIssueId: issue.id,
+              nextActionKind: entry.kind,
+              nextActionNote: entry.note ?? null,
+              nextActionSource: nextActionsSourceWasExplicit ? "explicit" : "auto_derived",
+            },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: targetIssueId,
+              taskId: targetIssueId,
+              originIssueId: issue.id,
+              wakeReason: `issue_next_action_${entry.kind}`,
+              source: "issue.next_actions",
+              nextActionKind: entry.kind,
+              nextActionNote: entry.note ?? null,
+              nextActionSource: nextActionsSourceWasExplicit ? "explicit" : "auto_derived",
             },
           });
         }

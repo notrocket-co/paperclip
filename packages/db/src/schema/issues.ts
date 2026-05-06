@@ -54,6 +54,12 @@ export const issues = pgTable(
       .references((): AnyPgColumn => executionWorkspaces.id, { onDelete: "set null" }),
     executionWorkspacePreference: text("execution_workspace_preference"),
     executionWorkspaceSettings: jsonb("execution_workspace_settings").$type<Record<string, unknown>>(),
+    nextActions: jsonb("next_actions").$type<Array<{
+      kind: "review" | "build" | "decide" | "close" | "terminal";
+      targetIssueId?: string | null;
+      targetAssigneeAgentId?: string | null;
+      note?: string | null;
+    }>>(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),

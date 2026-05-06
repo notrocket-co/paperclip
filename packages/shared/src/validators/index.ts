@@ -184,6 +184,9 @@ export {
   issueDocumentKeySchema,
   upsertIssueDocumentSchema,
   restoreIssueDocumentRevisionSchema,
+  ISSUE_NEXT_ACTION_KINDS,
+  issueNextActionSchema,
+  issueNextActionsSchema,
   type CreateIssue,
   type CreateChildIssue,
   type CreateIssueLabel,
@@ -200,6 +203,8 @@ export {
   type IssueDocumentFormat,
   type UpsertIssueDocument,
   type RestoreIssueDocumentRevision,
+  type IssueNextAction,
+  type IssueNextActionKind,
 } from "./issue.js";
 
 export {

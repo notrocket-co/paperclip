@@ -175,6 +175,28 @@ A change is done when all are true:
 3. Contracts are synced across db/shared/server/ui
 4. Docs updated when behavior or commands change
 5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
+6. **Close-out protocol (THEA-2806 / Pillar 5).** Every status flip an agent
+   makes to `done`, `in_review`, or `blocked` on `PATCH /api/issues/:id`
+   should carry an explicit `nextActions` payload (camelCase). The shape:
+
+   ```jsonc
+   "nextActions": [
+     {
+       "kind": "review" | "build" | "decide" | "close" | "terminal",
+       "targetIssueId": "<uuid>",            // optional; defaults to the same issue
+       "targetAssigneeAgentId": "<uuid>",    // required for non-terminal kinds
+       "note": "<brief context for the receiver>"
+     }
+   ]
+   ```
+
+   Use `[{ "kind": "terminal" }]` to declare "no follow-up." Without an
+   explicit payload the server auto-derives a default and logs an
+   `issue.next_actions.missing_advisory` warning + an
+   `issue.next_actions_advisory` activity-log entry — track the metric in
+   your CEO heartbeat summary. Phase 2 (hard-mode) will reject status flips
+   without an explicit emission. See
+   `server/src/services/issue-next-actions.ts` for the derivation rules.
 
 ## 11. Fork-Specific: HenkDz/paperclip
 

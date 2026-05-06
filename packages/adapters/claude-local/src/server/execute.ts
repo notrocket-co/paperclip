@@ -748,7 +748,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   try {
-    const initial = await runAttempt(sessionId ?? null);
+    let initial = await runAttempt(sessionId ?? null);
+
+    // THEA-2953: shared ~/.claude/.credentials.json across concurrent agents can
+    // produce a brief sub-second window where one CLI process invalidates the
+    // token a sibling just refreshed (see docs/claude-local-auth.md and parent
+    // THEA-2946 for forensics). Pause once and retry before bubbling the
+    // claude_auth_required error to the harness — single retry only.
+    const initialLoginMeta = detectClaudeLoginRequired({
+      parsed: initial.parsed,
+      stdout: initial.proc.stdout,
+      stderr: initial.proc.stderr,
+    });
+    if (initialLoginMeta.requiresLogin) {
+      await onLog(
+        "stdout",
+        "[claude-local] auth retry-with-pause (race window) — attempt 2/2\n",
+      );
+      const pauseMs = 1500 + Math.floor(Math.random() * 1500);
+      await new Promise<void>((resolve) => setTimeout(resolve, pauseMs));
+      initial = await runAttempt(sessionId ?? null);
+    }
+
     if (
       sessionId &&
       !initial.proc.timedOut &&

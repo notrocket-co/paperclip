@@ -187,6 +187,10 @@ export {
   ISSUE_NEXT_ACTION_KINDS,
   issueNextActionSchema,
   issueNextActionsSchema,
+  ISSUE_LIVENESS_INVARIANT_DEFAULTS,
+  ISSUE_LIVENESS_ESCALATION_TOKENS,
+  issueLivenessInvariantsSchema,
+  issuePhaseSchema,
   type CreateIssue,
   type CreateChildIssue,
   type CreateIssueLabel,
@@ -205,6 +209,8 @@ export {
   type RestoreIssueDocumentRevision,
   type IssueNextAction,
   type IssueNextActionKind,
+  type IssueLivenessInvariants,
+  type IssueLivenessEscalationToken,
 } from "./issue.js";
 
 export {

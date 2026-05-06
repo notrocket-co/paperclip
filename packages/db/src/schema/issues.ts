@@ -60,6 +60,16 @@ export const issues = pgTable(
       targetAssigneeAgentId?: string | null;
       note?: string | null;
     }>>(),
+    livenessInvariants: jsonb("liveness_invariants").$type<{
+      digestWithinMin?: number;
+      phasePromoteWithinMin?: number;
+      stagnationThresholdHours?: number;
+      escalationTarget?: string;
+    }>(),
+    phase: integer("phase"),
+    digestDueAt: timestamp("digest_due_at", { withTimezone: true }),
+    lastChildTransitionAt: timestamp("last_child_transition_at", { withTimezone: true }),
+    lastDigestAt: timestamp("last_digest_at", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -137,5 +147,11 @@ export const issues = pgTable(
           and ${table.hiddenAt} is null
           and ${table.status} not in ('done', 'cancelled')`,
       ),
+    livenessDigestDueIdx: index("issues_company_digest_due_idx")
+      .on(table.companyId, table.digestDueAt)
+      .where(sql`${table.digestDueAt} is not null`),
+    livenessPhaseParentIdx: index("issues_company_phase_parent_idx")
+      .on(table.companyId, table.parentId, table.phase)
+      .where(sql`${table.parentId} is not null and ${table.phase} is not null`),
   }),
 );

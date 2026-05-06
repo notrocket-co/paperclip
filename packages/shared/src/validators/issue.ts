@@ -171,6 +171,35 @@ export type IssueNextAction = z.infer<typeof issueNextActionSchema>;
 
 export const issueNextActionsSchema = z.array(issueNextActionSchema).max(20);
 
+// THEA-2807 — Pillar 4: project-level liveness invariants.
+// Defaults applied when the column is NULL or the field is omitted.
+export const ISSUE_LIVENESS_INVARIANT_DEFAULTS = {
+  digestWithinMin: 30,
+  phasePromoteWithinMin: 30,
+  stagnationThresholdHours: 24,
+  escalationTarget: "ceo",
+} as const;
+
+export const ISSUE_LIVENESS_ESCALATION_TOKENS = ["ceo", "creator"] as const;
+export type IssueLivenessEscalationToken = (typeof ISSUE_LIVENESS_ESCALATION_TOKENS)[number];
+
+const livenessEscalationTargetSchema = z.union([
+  z.enum(ISSUE_LIVENESS_ESCALATION_TOKENS),
+  z.string().uuid(),
+]);
+
+export const issueLivenessInvariantsSchema = z
+  .object({
+    digestWithinMin: z.number().int().positive().max(1440).optional(),
+    phasePromoteWithinMin: z.number().int().positive().max(1440).optional(),
+    stagnationThresholdHours: z.number().int().positive().max(720).optional(),
+    escalationTarget: livenessEscalationTargetSchema.optional(),
+  })
+  .strict();
+export type IssueLivenessInvariants = z.infer<typeof issueLivenessInvariantsSchema>;
+
+export const issuePhaseSchema = z.number().int().min(0).max(99);
+
 export const createIssueSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
@@ -228,6 +257,12 @@ export const updateIssueSchema = createIssueSchema.partial().extend({
   // auto-derived default for done/in_review/blocked transitions, or pass
   // [{ kind: "terminal" }] to assert no follow-up. `null` clears the field.
   nextActions: issueNextActionsSchema.nullable().optional(),
+  // THEA-2807 — Pillar 4 invariant declaration on this issue (umbrella).
+  // `null` reverts to defaults; `{}` is treated identically to defaults.
+  livenessInvariants: issueLivenessInvariantsSchema.nullable().optional(),
+  // THEA-2807 — Pillar 4 phase membership for this child within its parent's
+  // phase auto-promote schedule. `null` means "not phased" (counts as phase 0).
+  phase: issuePhaseSchema.nullable().optional(),
 });
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;

@@ -491,7 +491,7 @@ export async function findStagnantUmbrellas(
         COALESCE(i.last_digest_at, i.created_at),
         i.created_at
       ) <
-        ${input.now} - (
+        ${input.now.toISOString()}::timestamptz - (
           (COALESCE((i.liveness_invariants->>'stagnationThresholdHours')::int, 24)) * INTERVAL '1 hour'
         )
     ORDER BY GREATEST(

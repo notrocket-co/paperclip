@@ -1671,6 +1671,48 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  it("skips reconcile entirely for anchor issues listed in PAPERCLIP_ANCHOR_ISSUE_IDS", async () => {
+    const { agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+    });
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const anchorIdentifier = issueRow?.identifier;
+    expect(anchorIdentifier).toBeTruthy();
+
+    const previousEnv = process.env.PAPERCLIP_ANCHOR_ISSUE_IDS;
+    process.env.PAPERCLIP_ANCHOR_ISSUE_IDS = anchorIdentifier!;
+    try {
+      const heartbeat = heartbeatService(db);
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+      expect(result.continuationRequeued).toBe(0);
+      expect(result.dispatchRequeued).toBe(0);
+      expect(result.escalated).toBe(0);
+      expect(result.skipped).toBeGreaterThanOrEqual(1);
+      expect(result.issueIds).not.toContain(issueId);
+
+      const runs = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.agentId, agentId));
+      expect(runs).toHaveLength(1);
+      expect(runs[0]?.id).toBe(runId);
+
+      const wakeups = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, agentId));
+      expect(wakeups).toHaveLength(1);
+    } finally {
+      if (previousEnv === undefined) {
+        delete process.env.PAPERCLIP_ANCHOR_ISSUE_IDS;
+      } else {
+        process.env.PAPERCLIP_ANCHOR_ISSUE_IDS = previousEnv;
+      }
+    }
+  });
+
   it("does not continue seeded in-progress work that has no run linkage", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

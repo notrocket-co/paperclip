@@ -54,6 +54,29 @@ const STRANDED_ISSUE_RECOVERY_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.strandedIssueR
 const STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.staleActiveRunEvaluation;
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 
+// Issues that are intentional permanent silent anchors — never reconcile or wake them.
+// THEA-677 is the routine-execution parent: it stays in_progress forever by design,
+// and any continuation wake feeds a self-perpetuating loop (see THEA-1814).
+const DEFAULT_ANCHOR_ISSUE_IDENTIFIERS = ["THEA-677"] as const;
+const ANCHOR_ISSUE_IDS_ENV_VAR = "PAPERCLIP_ANCHOR_ISSUE_IDS";
+
+function getAnchorIssueIdentifiers(): Set<string> {
+  const raw = process.env[ANCHOR_ISSUE_IDS_ENV_VAR];
+  if (raw === undefined) {
+    return new Set<string>(DEFAULT_ANCHOR_ISSUE_IDENTIFIERS);
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return new Set<string>();
+  }
+  return new Set(
+    trimmed
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  );
+}
+
 type RecoveryWakeupOptions = {
   source?: "timer" | "assignment" | "on_demand" | "automation";
   triggerDetail?: "manual" | "ping" | "callback" | "system";
@@ -1593,7 +1616,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       issueIds: [] as string[],
     };
 
+    const anchorIssueIdentifiers = getAnchorIssueIdentifiers();
+
     for (const issue of candidates) {
+      if (issue.identifier && anchorIssueIdentifiers.has(issue.identifier)) {
+        result.skipped += 1;
+        continue;
+      }
+
       const agentId = issue.assigneeAgentId;
       if (!agentId) {
         result.skipped += 1;

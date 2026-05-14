@@ -213,6 +213,121 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     });
   });
 
+  it("allows assignee PATCH to recover when run has finishedAt but status is still running", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const zombieRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: zombieRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(Date.now() - 10 * 60 * 1000),
+      finishedAt: new Date(),
+    });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Zombie finished-but-running lock",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: zombieRunId,
+      executionRunId: zombieRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Recovered from zombie finishedAt" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.title).toBe("Recovered from zombie finishedAt");
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ checkoutRunId: currentRunId, executionRunId: currentRunId });
+  });
+
+  it("allows assignee PATCH to recover when run has been running >4h without output (zombie)", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const zombieRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: zombieRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(Date.now() - 5 * 60 * 60 * 1000),
+    });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Zombie silent run lock",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: zombieRunId,
+      executionRunId: zombieRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Recovered from 5h zombie" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.title).toBe("Recovered from 5h zombie");
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ checkoutRunId: currentRunId, executionRunId: currentRunId });
+  });
+
+  it("does NOT allow checkout adoption when run is actively running with recent output", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const activeRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: activeRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(Date.now() - 5 * 60 * 1000),
+      lastOutputAt: new Date(Date.now() - 60 * 1000),
+    });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Active run should block",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: activeRunId,
+      executionRunId: activeRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Should be blocked" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("Issue run ownership conflict");
+  });
+
   it("restricts admin force-release to board users with company access and writes an audit event", async () => {
     const { companyId, agentId, failedRunId, currentRunId } = await seedCompanyAgentAndRuns();
     const issueId = randomUUID();

@@ -192,6 +192,10 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+// A non-terminal run with no output for this long is treated as a zombie — its
+// checkout lock may be adopted by the rightful assignee's next run.
+// Matches ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS in the recovery service.
+const ZOMBIE_RUN_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 const ISSUE_LIST_DESCRIPTION_MAX_CHARS = 1200;
 const ISSUE_LIST_DESCRIPTION_MAX_BYTES = ISSUE_LIST_DESCRIPTION_MAX_CHARS * 4;
 
@@ -1960,12 +1964,24 @@ export function issueService(db: Db) {
 
   async function isTerminalOrMissingHeartbeatRun(runId: string) {
     const run = await db
-      .select({ status: heartbeatRuns.status })
+      .select({
+        status: heartbeatRuns.status,
+        finishedAt: heartbeatRuns.finishedAt,
+        startedAt: heartbeatRuns.startedAt,
+        lastOutputAt: heartbeatRuns.lastOutputAt,
+      })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     if (!run) return true;
-    return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
+    if (TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return true;
+    // finishedAt is set when the process exits; status may lag behind in edge cases
+    if (run.finishedAt) return true;
+    // A run with no output for ZOMBIE_RUN_THRESHOLD_MS is treated as a zombie so its
+    // checkout lock can be adopted by the assignee's next run
+    const lastActivity = run.lastOutputAt ?? run.startedAt;
+    if (lastActivity && Date.now() - lastActivity.getTime() > ZOMBIE_RUN_THRESHOLD_MS) return true;
+    return false;
   }
 
   async function adoptStaleCheckoutRun(input: {
@@ -2057,11 +2073,19 @@ export function issueService(db: Db) {
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
       );
       const run = await tx
-        .select({ status: heartbeatRuns.status })
+        .select({
+          status: heartbeatRuns.status,
+          finishedAt: heartbeatRuns.finishedAt,
+          startedAt: heartbeatRuns.startedAt,
+          lastOutputAt: heartbeatRuns.lastOutputAt,
+        })
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.executionRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return false;
+      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status) && !run.finishedAt) {
+        const lastActivity = run.lastOutputAt ?? run.startedAt;
+        if (!lastActivity || Date.now() - lastActivity.getTime() <= ZOMBIE_RUN_THRESHOLD_MS) return false;
+      }
 
       const updated = await tx
         .update(issues)

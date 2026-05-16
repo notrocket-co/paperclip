@@ -2811,6 +2811,43 @@ export function issueRoutes(
         }
       }
 
+      // THEA-4855 (WS-0): Wake parent on any single child terminal or in_progress transition.
+      // Fires independently of the all-children-done check above so the parent agent gets
+      // an immediate nudge on each subtask state change, not just after the final one.
+      // Gate: set PAPERCLIP_CHILD_TRANSITION_WAKE=false to disable without a deploy.
+      if (process.env.PAPERCLIP_CHILD_TRANSITION_WAKE !== "false" && issue.parentId) {
+        const childBecameInProgress = existing.status !== "in_progress" && issue.status === "in_progress";
+        if (becameTerminal || childBecameInProgress) {
+          try {
+            const parent = await svc.getWakeableParentForChildTransition(issue.parentId);
+            if (parent) {
+              const wakeReason = becameTerminal ? "issue_child_completed" : "issue_child_started";
+              addWakeup(parent.assigneeAgentId, {
+                source: "automation",
+                triggerDetail: "system",
+                reason: wakeReason,
+                payload: { issueId: parent.id, childIssueId: issue.id, childStatus: issue.status },
+                requestedByActorType: actor.actorType,
+                requestedByActorId: actor.actorId,
+                contextSnapshot: {
+                  issueId: parent.id,
+                  taskId: parent.id,
+                  wakeReason,
+                  source: "issue.child_transition",
+                  childIssueId: issue.id,
+                  childStatus: issue.status,
+                },
+              });
+            }
+          } catch (err) {
+            logger.warn(
+              { err, issueId: issue.id, parentId: issue.parentId, thea4855: true },
+              "cascade.child_transition_wake_failed",
+            );
+          }
+        }
+      }
+
       // THEA-2807 — Pillar 4: liveness invariants on this child's parent.
       // Fires on EVERY child status transition (not just terminal). Two
       // effects: (a) atomic-CAS-arm `digest_due_at` so the parent gets a

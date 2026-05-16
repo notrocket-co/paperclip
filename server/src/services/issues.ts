@@ -2608,6 +2608,25 @@ export function issueService(db: Db) {
       };
     },
 
+    // THEA-4855 (WS-0): Lightweight parent lookup for any child transition
+    // (done, cancelled, or in_progress). Unlike getWakeableParentAfterChildCompletion,
+    // this fires on a single child transition without waiting for all siblings to be terminal.
+    getWakeableParentForChildTransition: async (parentIssueId: string) => {
+      const parent = await db
+        .select({
+          id: issues.id,
+          assigneeAgentId: issues.assigneeAgentId,
+          status: issues.status,
+        })
+        .from(issues)
+        .where(eq(issues.id, parentIssueId))
+        .then((rows) => rows[0] ?? null);
+      if (!parent || !parent.assigneeAgentId || ["backlog", "done", "cancelled"].includes(parent.status)) {
+        return null;
+      }
+      return { id: parent.id, assigneeAgentId: parent.assigneeAgentId };
+    },
+
     createChild: async (
       parentIssueId: string,
       data: IssueChildCreateInput,

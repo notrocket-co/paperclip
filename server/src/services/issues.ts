@@ -1969,6 +1969,7 @@ export function issueService(db: Db) {
         finishedAt: heartbeatRuns.finishedAt,
         startedAt: heartbeatRuns.startedAt,
         lastOutputAt: heartbeatRuns.lastOutputAt,
+        livenessState: heartbeatRuns.livenessState,
       })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
@@ -1977,6 +1978,8 @@ export function issueService(db: Db) {
     if (TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return true;
     // finishedAt is set when the process exits; status may lag behind in edge cases
     if (run.finishedAt) return true;
+    // liveness_state='failed' is a reliable terminal signal even if status hasn't been stamped yet
+    if (run.livenessState === "failed") return true;
     // A run with no output for ZOMBIE_RUN_THRESHOLD_MS is treated as a zombie so its
     // checkout lock can be adopted by the assignee's next run
     const lastActivity = run.lastOutputAt ?? run.startedAt;
@@ -2078,11 +2081,12 @@ export function issueService(db: Db) {
           finishedAt: heartbeatRuns.finishedAt,
           startedAt: heartbeatRuns.startedAt,
           lastOutputAt: heartbeatRuns.lastOutputAt,
+          livenessState: heartbeatRuns.livenessState,
         })
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.executionRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status) && !run.finishedAt) {
+      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status) && !run.finishedAt && run.livenessState !== "failed") {
         const lastActivity = run.lastOutputAt ?? run.startedAt;
         if (!lastActivity || Date.now() - lastActivity.getTime() <= ZOMBIE_RUN_THRESHOLD_MS) return false;
       }

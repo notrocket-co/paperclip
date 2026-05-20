@@ -328,6 +328,50 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     expect(res.body.error).toBe("Issue run ownership conflict");
   });
 
+  it("allows checkout adoption when run still has status=running but liveness_state=failed (THEA-6020 process_lost defense-in-depth)", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    // Simulate a process_lost run: supervisor stamped liveness_state='failed' atomically
+    // with the retry creation, but status='running' hasn't been reaped yet.
+    const processLostRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: processLostRunId,
+      companyId,
+      agentId,
+      status: "running",
+      livenessState: "failed",
+      invocationSource: "manual",
+      startedAt: new Date(Date.now() - 5 * 60 * 1000),
+      lastOutputAt: new Date(Date.now() - 60 * 1000),
+    });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Process-lost run should not block",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: processLostRunId,
+      executionRunId: processLostRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Recovered from process_lost" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.title).toBe("Recovered from process_lost");
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ checkoutRunId: currentRunId, executionRunId: currentRunId });
+  });
+
   it("restricts admin force-release to board users with company access and writes an audit event", async () => {
     const { companyId, agentId, failedRunId, currentRunId } = await seedCompanyAgentAndRuns();
     const issueId = randomUUID();

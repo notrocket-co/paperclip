@@ -3305,6 +3305,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
 
     const queued = await db.transaction(async (tx) => {
+      // Atomically ensure the prior run is terminal before the retry pointer is
+      // visible. setRunStatus was already called in reapOrphanedRuns, but if that
+      // write lost a race (e.g. transient DB error + fallback getRun path), the
+      // corpse would stay 'running' and block checkout for up to ZOMBIE_RUN_THRESHOLD_MS.
+      if (!isHeartbeatRunTerminalStatus(run.status)) {
+        await tx
+          .update(heartbeatRuns)
+          .set({ status: "failed", finishedAt: now, updatedAt: now })
+          .where(
+            and(
+              eq(heartbeatRuns.id, run.id),
+              notInArray(heartbeatRuns.status, [...HEARTBEAT_RUN_TERMINAL_STATUSES]),
+            ),
+          );
+      }
+
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({

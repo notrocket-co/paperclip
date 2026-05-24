@@ -747,6 +747,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  // Write .mcp.json to the workspace cwd before spawning Claude so MCP tools
+  // are available from the first run, regardless of sync-server timing (THEA-4800).
+  if (!executionTargetIsRemote) {
+    const mcpServers = parseObject(config.mcpServers);
+    const mcpServerKeys = Object.keys(mcpServers);
+    if (mcpServerKeys.length > 0) {
+      const mcpJsonPath = path.join(cwd, ".mcp.json");
+      const desired = JSON.stringify({ mcpServers }, null, 2) + "\n";
+      let current: string | null = null;
+      try {
+        current = await fs.readFile(mcpJsonPath, "utf-8");
+      } catch {
+        // file does not exist yet
+      }
+      if (current !== desired) {
+        await fs.writeFile(mcpJsonPath, desired, "utf-8");
+        await onLog(
+          "stdout",
+          `[paperclip] Wrote .mcp.json with MCP servers: ${mcpServerKeys.join(", ")}\n`,
+        );
+      }
+    }
+  }
+
   try {
     let initial = await runAttempt(sessionId ?? null);
 
